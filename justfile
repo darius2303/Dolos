@@ -21,10 +21,5 @@ server:
 client:
     ./build/Release/client
 
-dev-server:
-    just cbuild
-    just server
-
-dev-client:
-    just cbuild
-    just client
+admin:
+    ./build/Release/admin

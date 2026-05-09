@@ -2,6 +2,7 @@
 gsoap/2.8.139
 argtable2/2.13
 libconfig/1.7.3
+ncurses/6.4
 
 [tool_requires]
 gsoap/2.8.139

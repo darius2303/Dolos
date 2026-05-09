@@ -2,18 +2,108 @@
 #include "soapH.h"
 #include "soapStub.h"
 #include <ctype.h>
+#include <errno.h>
+#include <fcntl.h>
 #include <libconfig.h>
 #include <libstemmer.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
 // descriptorul de fisier  pentru scrierea in pipe-ul de logging
 int log_fd = -1;
+
+// variablia glocala in care retinem configurarea server-ului (cea care poate fi
+// schimbata de catre admin) modificata de admin la runtime modificarile sunt
+// vizibile real-time
+AdminState *g_admin_state = NULL;
+int shm_fd_server = -1;
+
+pthread_mutex_t thread_limit_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+// variabila conditie, permite thread-ului sa:
+// - fie in sleep pana cand o conditie devine true
+// - se trezeasca la momentul in care conditia devine true
+pthread_cond_t thread_limit_cond = PTHREAD_COND_INITIALIZER;
+
+int server_shm_init(void) {
+  // creeaza conexiunea dintre shared memory object si un file descritor
+  // SHM_NAME -> variabila importata din server_state.h
+  // O_CREAT | ORDWR -> deschidem obiectul de shared memory pentru scris si
+  // citit, il creem daca nu exista
+  shm_fd_server = shm_open(SHM_NAME, O_CREAT | O_RDWR, 0666);
+
+  // tratam cazul de eroare
+  if (shm_fd_server < 0) {
+    perror("shm_open");
+    return -1;
+  }
+
+  // alocam memorie suficienta pentru a putea mentine o structura de tipul
+  // AdminState
+  if (ftruncate(shm_fd_server, sizeof(AdminState)) < 0) {
+    // tratam cazul de eroare
+    perror("ftruncate");
+    close(shm_fd_server);
+    return -1;
+  }
+
+  // facem maparea dintre obiectul de shared memory si address space-ul
+  // prcocesului MAP_SHARED -> schimbarile sunt share-uite cu toate celelalte
+  // procese care folosesc spatiul de memorie shared
+  g_admin_state = mmap(NULL, sizeof(AdminState), PROT_READ | PROT_WRITE,
+                       MAP_SHARED, shm_fd_server, 0);
+
+  // tratam cazul de eroare
+  if (g_admin_state == MAP_FAILED) {
+    perror("mmap");
+    close(shm_fd_server);
+    return -1;
+  }
+
+  // majoritatea campurilor sunt atomice pentru acces concurent sigur intre
+  // procese status_msg este best-effort
+  atomic_store(&g_admin_state->paused, 0);
+  atomic_store(&g_admin_state->log_level, LOG_LEVEL_NORMAL);
+  atomic_store(&g_admin_state->max_threads, 8);
+  atomic_store(&g_admin_state->requests_done, 0);
+  atomic_store(&g_admin_state->requests_active, 0);
+  atomic_store(&g_admin_state->shutdown, 0);
+  atomic_store(&g_admin_state->shingle_k, SHINGLE_K_DEFAULT);
+  strncpy(g_admin_state->status_msg, "Server pornit.", 127);
+  g_admin_state->status_msg[127] = '\0';
+
+  printf("[SERVER] Memorie partajata initiata: %s\n", SHM_NAME);
+  return 0;
+}
+
+// functie de cleanup pentru memoria partajata
+void server_shm_cleanup(void) {
+  if (g_admin_state && g_admin_state != MAP_FAILED) {
+    // sterge maparea din address space
+    munmap(g_admin_state, sizeof(AdminState));
+    g_admin_state = NULL;
+  }
+  if (shm_fd_server >= 0) {
+    // inchide file descriptor-ul din shared memory file
+    close(shm_fd_server);
+    shm_fd_server = -1;
+  }
+  shm_unlink(SHM_NAME);
+}
+
+// funcite care seteaza mesajul de status
+void shm_set_status(const char *msg) {
+  if (!g_admin_state)
+    return;
+  strncpy(g_admin_state->status_msg, msg, 127);
+  g_admin_state->status_msg[127] = '\0';
+}
 
 // functia care incarca configuratia serverului dintr-un fisier cfg
 void config_load(const char *path, ServerConfig *cfg) {
@@ -93,11 +183,11 @@ int tokenize_and_stem(const unsigned char *data, int size,
 // construieste shingle-uri (ferestre de k tokeni) si le hashuieste
 // returneaza numarul de shingle-uri unice
 int build_shingles(char tokens[][64], int token_count, unsigned long *shingles,
-                   int max_shingles) {
+                   int max_shingles, int k) {
   int count = 0;
-  for (int i = 0; i <= token_count - SHINGLE_K && count < max_shingles; i++) {
+  for (int i = 0; i <= token_count - k && count < max_shingles; i++) {
     unsigned long h = 5381;
-    for (int j = 0; j < SHINGLE_K; j++) {
+    for (int j = 0; j < k; j++) {
       for (const char *c = tokens[i + j]; *c; c++) {
         h = ((h << 5) + h) + (unsigned char)*c;
       }
@@ -113,18 +203,74 @@ int build_shingles(char tokens[][64], int token_count, unsigned long *shingles,
 // astepta rezultatul obtinut de la fiecare inainte de computarea report-ului
 void *tokenize_thread(void *arg) {
   TokenizeArgs *a = (TokenizeArgs *)arg;
+
+  if (g_admin_state) {
+    // ne vom asigura ca nu depasim numarul maxim de threads pentru task ul de
+    // tokenize
+    pthread_mutex_lock(&thread_limit_mutex);
+
+    // asteptam intr-un loop daca am ajuns la numarul maxim de threads
+    // pthread cond wait v-a da release la mutex
+    while (atomic_load(&g_admin_state->requests_active) >=
+           atomic_load(&g_admin_state->max_threads)) {
+
+      // pthread_cond_wait:
+      // - eliberează mutex-ul automat
+      // - pune thread-ul în sleep
+      // - re-acquire mutex-ul la trezire
+      pthread_cond_wait(&thread_limit_cond, &thread_limit_mutex);
+    }
+
+    // rezervam un slot pentru acest thread
+    atomic_fetch_add(&g_admin_state->requests_active, 1);
+
+    // iesim din sectiunea critica permitand altor thread uri sa verifice limita
+    pthread_mutex_unlock(&thread_limit_mutex);
+  }
+
+  int k = a->shingle_k;
+  if (g_admin_state) {
+    int live_k = atomic_load(&g_admin_state->shingle_k);
+    if (live_k >= 1 && live_k <= 10)
+      k = live_k;
+  }
+
   a->token_count = tokenize_and_stem(a->data, a->size, (char (*)[64])a->tokens,
                                      a->max_tokens);
   a->shingle_count = build_shingles((char (*)[64])a->tokens, a->token_count,
-                                    a->shingles, a->max_shingles);
-  printf("[SERVER] [thread] Fisier analizat: %s (%d tokeni, %d shingle-uri)\n",
-         a->filename, a->token_count, a->shingle_count);
+                                    a->shingles, a->max_shingles, k);
+
+  // citim log level si in functie de el aratam un mesaj mai detaliat
+  int log_lv =
+      g_admin_state ? atomic_load(&g_admin_state->log_level) : LOG_LEVEL_NORMAL;
+  if (log_lv >= LOG_LEVEL_VERBOSE) {
+    printf(
+        "[SERVER] [thread] Fisier analizat: %s (%d tokeni, %d shingle-uri)\n",
+        a->filename, a->token_count, a->shingle_count);
+  }
+
+  // finalul executiei thread-ului:
+  // eliberam un slot în limita de thread-uri active și notificam
+  // thread-urile care aateapta ca exista spatiu liber.
+  if (g_admin_state) {
+    pthread_mutex_lock(&thread_limit_mutex);
+
+    // reducem numarul de thread-uri active (un slot devine disponibil)
+    atomic_fetch_sub(&g_admin_state->requests_active, 1);
+
+    // trezeste thread-urile blocate în pthread_cond_wait()
+    // pentru a le permite sa re-verifice conditia de executie
+    pthread_cond_broadcast(&thread_limit_cond);
+
+    pthread_mutex_unlock(&thread_limit_mutex);
+  }
+
   return NULL;
 }
 
 // calculeaza similaritatea Jaccard intre doua seturi de shingle-uri
 // rezultatul este un numar intre 0.0 (complet diferite) si 1.0 (identice)
-static double jaccard(unsigned long *a, int na, unsigned long *b, int nb) {
+double jaccard(unsigned long *a, int na, unsigned long *b, int nb) {
   int intersect = 0;
   char *used = calloc(nb, sizeof(char));
 
@@ -151,6 +297,17 @@ static double jaccard(unsigned long *a, int na, unsigned long *b, int nb) {
 int ns__analyzeFiles(struct soap *soap, struct ns__ArrayOfFiles files,
                      char **report) {
   int n = files.__size;
+
+  if (g_admin_state && atomic_load(&g_admin_state->paused)) {
+    *report = soap_strdup(
+        soap, "Serverul este in pauza. Incercati din nou mai tarziu.\n");
+    return SOAP_OK;
+  }
+
+  if (g_admin_state && atomic_load(&g_admin_state->shutdown)) {
+    *report = soap_strdup(soap, "Serverul se opreste. Conexiune refuzata.\n");
+    return SOAP_OK;
+  }
 
   if (n < 2) {
     *report = soap_strdup(
@@ -179,6 +336,14 @@ int ns__analyzeFiles(struct soap *soap, struct ns__ArrayOfFiles files,
     return soap_receiver_fault(soap, "Memorie insuficienta pe server", NULL);
   }
 
+  int current_k = SHINGLE_K_DEFAULT;
+  if (g_admin_state) {
+    // update la k-value daca aceasta a fost configurata de admin
+    int lk = atomic_load(&g_admin_state->shingle_k);
+    if (lk >= 1 && lk <= 10)
+      current_k = lk;
+  }
+
   // pornim cate un thread pentru fiecare fisier
   for (int i = 0; i < n; i++) {
     args[i].data = files.__ptr[i].data.__ptr;
@@ -188,6 +353,7 @@ int ns__analyzeFiles(struct soap *soap, struct ns__ArrayOfFiles files,
     args[i].shingles = shingles[i];
     args[i].max_shingles = MAX_SHINGLES;
     args[i].filename = files.__ptr[i].filename;
+    args[i].shingle_k = current_k;
     pthread_create(&threads[i], NULL, tokenize_thread, &args[i]);
   }
 
@@ -215,6 +381,13 @@ int ns__analyzeFiles(struct soap *soap, struct ns__ArrayOfFiles files,
                       files.__ptr[i].filename, files.__ptr[j].filename,
                       sim * 100.0);
     }
+  }
+
+  if (g_admin_state) {
+    atomic_fetch_add(&g_admin_state->requests_done, 1);
+    char smsg[128];
+    snprintf(smsg, sizeof(smsg), "Ultima cerere: %d fisiere analizate", n);
+    shm_set_status(smsg);
   }
 
   char logbuf[BUFFER_SIZE];
@@ -297,6 +470,10 @@ void logger_log(const char *msg) {
   if (log_fd < 0)
     return;
 
+  if (g_admin_state &&
+      atomic_load(&g_admin_state->log_level) == LOG_LEVEL_QUIET)
+    return;
+
   // generam timestamp-ul curent
   char timestamp[BUFFER_SIZE];
   time_t now = time(NULL);
@@ -318,20 +495,43 @@ void start_server(int port, const char *log_dir) {
   struct soap soap;
   soap_init(&soap);
 
+  if (server_shm_init() < 0) {
+    fprintf(stderr, "[SERVER] Avertisment: nu s-a putut initializa shm. "
+                    "Admin panel-ul nu va functiona.\n");
+  }
+
   // pornim sistemul de logging
   logger_init(log_dir);
 
   // facem bind pe portul configurat
   if (soap_bind(&soap, NULL, port, 100) < 0) {
     soap_print_fault(&soap, stderr);
+    server_shm_cleanup();
     return;
   }
 
   printf("[SERVER] Server ruleaza pe port %d...\n", port);
+  printf(
+      "[SERVER] Memorie partajata: %s  (porniti admin/admin pentru control)\n",
+      SHM_NAME);
   logger_log("Server initializat.");
+  shm_set_status("Server activ.");
 
   // bucla principala: asteptam si procesam cereri soap
   while (1) {
+    if (g_admin_state && atomic_load(&g_admin_state->shutdown)) {
+      printf("[SERVER] Semnal de shutdown primit din admin panel. Oprire...\n");
+      logger_log("Server oprit prin admin panel.");
+      shm_set_status("Shutdown in curs...");
+      break;
+    }
+
+    if (g_admin_state && atomic_load(&g_admin_state->paused)) {
+      shm_set_status("Server in pauza.");
+      sleep(1);
+      continue;
+    }
+
     if (soap_accept(&soap) < 0)
       break;
     soap_serve(&soap);
@@ -341,4 +541,5 @@ void start_server(int port, const char *log_dir) {
   // inchidem pipe-ul de logging si eliberam resursele soap
   close(log_fd);
   soap_done(&soap);
+  server_shm_cleanup();
 }

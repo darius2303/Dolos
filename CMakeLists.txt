@@ -9,6 +9,7 @@ find_package(argtable2 REQUIRED)
 find_package(OpenSSL REQUIRED)
 find_package(ZLIB REQUIRED)
 find_package(libconfig REQUIRED)
+find_package(Curses REQUIRED)
 
 find_program(GSOAP_CPP2 soapcpp2 REQUIRED)
 
@@ -58,6 +59,7 @@ add_executable(server
     ${GEN_DIR}/soapC.c
     ${GEN_DIR}/soapServer.c
 )
+
 target_link_libraries(server PRIVATE
     ${GSOAP_C_LIB}
     argtable2::argtable2
@@ -68,12 +70,14 @@ target_link_libraries(server PRIVATE
     ${STEMMER_O}
     pthread
 )
+
 target_include_directories(server PRIVATE
     ${GEN_DIR}
     server
     ${gsoap_INCLUDE_DIRS}
     libs
 )
+
 add_dependencies(server gsoap_gen_target)
 
 add_executable(client
@@ -82,6 +86,7 @@ add_executable(client
     ${GEN_DIR}/soapC.c
     ${GEN_DIR}/soapClient.c
 )
+
 target_link_libraries(client PRIVATE
     ${GSOAP_C_LIB}
     argtable2::argtable2
@@ -90,9 +95,25 @@ target_link_libraries(client PRIVATE
     ZLIB::ZLIB
     libconfig::libconfig
 )
+
 target_include_directories(client PRIVATE
     ${GEN_DIR}
     client
     ${gsoap_INCLUDE_DIRS}
 )
+
 add_dependencies(client gsoap_gen_target)
+
+add_executable(admin
+    admin/admin.c
+)
+
+target_link_libraries(admin PRIVATE
+    Curses::Curses
+    pthread
+)
+
+target_include_directories(admin PRIVATE
+    admin
+    server
+)

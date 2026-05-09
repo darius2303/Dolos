@@ -3,12 +3,15 @@
 
 #include <libconfig.h>
 
+// Includem starea partajata cu admin clientul
+#include "../server_state.h"
+
 // dimensiunea bufferului folosit pentru mesaje si logging
 #define BUFFER_SIZE 1024
 // numarul maxim de tokeni per fisier
 #define MAX_TOKENS 65536
-// dimensiunea ferestrei de shingle-uri (k-shingles)
-#define SHINGLE_K 3
+// dimensiunea ferestrei de shingle-uri (k-shingles) — valoare implicita
+#define SHINGLE_K_DEFAULT 3
 // numarul maxim de shingle-uri unice per fisier
 #define MAX_SHINGLES 65536
 
@@ -30,8 +33,16 @@ typedef struct {
   int max_shingles;          // limita de shingle-uri
   int shingle_count;         // rezultat: cate shingle-uri s-au gasit
   const char *filename;      // pentru logging
+  int shingle_k;             // dimensiunea ferestrei (citita din shm)
 } TokenizeArgs;
 
+// pointerul global catre starea administrativa (mapat in shm)
+extern AdminState *g_admin_state;
+
+// initializeaza / creeaza segmentul shm si il mapeaza
+int server_shm_init(void);
+// elibereaza segmentul shm (apelata la shutdown)
+void server_shm_cleanup(void);
 // incarca configuratia serverului din fisierul cfg
 void config_load(const char *path, ServerConfig *cfg);
 // porneste serverul pe portul si directorul de loguri configurate
@@ -40,7 +51,7 @@ void start_server(int port, const char *log_dir);
 void logger_init(const char *log_dir);
 // scrie un mesaj in log cu timestamp
 void logger_log(const char *msg);
-
+// functie de tokenize rulata de fiecare thread pe fisierul sau
 void *tokenize_thread(void *arg);
 
 #endif
