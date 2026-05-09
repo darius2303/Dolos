@@ -38,7 +38,7 @@ add_custom_command(
     ${GEN_DIR}/soapClient.c
     ${GEN_DIR}/soapStub.h
     ${GEN_DIR}/soapH.h
-    ${GEN_DIR}/service.nsmap
+    ${GEN_DIR}/ns.nsmap
     COMMAND ${GSOAP_CPP2} -c -d ${GEN_DIR} -I${GSOAP_IMPORT_DIR} ${SERVICE}
     DEPENDS ${SERVICE}
     WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
@@ -66,6 +66,7 @@ target_link_libraries(server PRIVATE
     ZLIB::ZLIB
     libconfig::libconfig
     ${STEMMER_O}
+    pthread
 )
 target_include_directories(server PRIVATE
     ${GEN_DIR}

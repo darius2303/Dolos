@@ -1,4 +1,5 @@
-// includerea headerului serverului
+// punctul de intrare al serverului
+#include "ns.nsmap"
 #include "server.h"
 #include <stdio.h>
 
@@ -8,9 +9,10 @@ int main(void) {
   config_load("config/server.cfg", &cfg);
 
   // afisam configuratia cu care porneste serverul
-  printf("Configurare server: port = %d, log_dir = %s\n", cfg.port, cfg.log_dir);
+  printf("Configurare server: port = %d, log_dir = %s\n", cfg.port,
+         cfg.log_dir);
 
-  // pornim serverul pe portul si directorul de loguri configurate
+  // pornim serverul
   start_server(cfg.port, cfg.log_dir);
   return 0;
 }

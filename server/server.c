@@ -1,10 +1,10 @@
-// includerea headerului serverului si a tuturor bibliotecilor necesare
 #include "server.h"
-#include "service.nsmap"
 #include "soapH.h"
 #include "soapStub.h"
+#include <ctype.h>
 #include <libconfig.h>
 #include <libstemmer.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,10 +12,8 @@
 #include <time.h>
 #include <unistd.h>
 
-#define BUFFER_SIZE 1024
-
-// descriptorul de fisier static pentru scrierea in pipe-ul de logging
-static int log_fd = -1;
+// descriptorul de fisier  pentru scrierea in pipe-ul de logging
+int log_fd = -1;
 
 // functia care incarca configuratia serverului dintr-un fisier cfg
 void config_load(const char *path, ServerConfig *cfg) {
@@ -55,65 +53,184 @@ void config_load(const char *path, ServerConfig *cfg) {
   config_destroy(&lib_cfg);
 }
 
-// implementarea serviciului soap hello - primeste un nume si returneaza un salut
-int ns__hello(struct soap *soap, char *name, char **result) {
-  // logam faptul ca serviciul hello a fost apelat
-  char buf[BUFFER_SIZE];
-  snprintf(buf, sizeof(buf), "ns__hello serviciu apelat");
-  logger_log(buf);
+// tokenizeaza si stemeaza continutul unui fisier
+// returneaza numarul de tokeni gasiti
+int tokenize_and_stem(const unsigned char *data, int size,
+                      char stemmed_tokens[][64], int max_tokens) {
+  // pentru fisiere de cod nu aplicam stemming
+  // doar extragem tokenii si ii convertim la lowercase
+  int count = 0;
+  char *buf = malloc(size + 1);
+  memcpy(buf, data, size);
+  buf[size] = '\0';
 
-  // cream un stemmer de test pentru limba engleza (demo libstemmer)
+  char *p = buf;
+  while (*p && count < max_tokens) {
+    // sari peste caractere care nu sunt alfanumerice sau underscore
+    while (*p && !isalnum((unsigned char)*p) && *p != '_')
+      p++;
+    if (!*p)
+      break;
 
-  // test libstemmer
-  struct sb_stemmer *stm = sb_stemmer_new("english", "UTF_8");
-  if (stm != NULL) {
-    sb_stemmer_delete(stm);
+    char word[64];
+    int wlen = 0;
+    while (*p && (isalnum((unsigned char)*p) || *p == '_') && wlen < 63) {
+      word[wlen++] = tolower((unsigned char)*p++);
+    }
+    word[wlen] = '\0';
+    if (wlen == 0)
+      continue;
+
+    strncpy(stemmed_tokens[count], word, 63);
+    stemmed_tokens[count][63] = '\0';
+    count++;
   }
 
-  // alocam memorie pentru raspuns si construim mesajul de salut
-  *result = (char *)soap_malloc(soap, BUFFER_SIZE);
-  snprintf(*result, BUFFER_SIZE, "Hello %s", name);
-  return SOAP_OK;
+  free(buf);
+  return count;
 }
 
-// implementarea serviciului soap register - inregistreaza un utilizator nou
-int ns__register(struct soap *soap, char *username, char *password,
-                 int *result) {
-  // logam inregistrarea utilizatorului
-  char buf[BUFFER_SIZE];
-  snprintf(buf, sizeof(buf), "User inregistrat: %s", username);
-  logger_log(buf);
-
-  // marcam parametrii nefolositi explicit pentru a evita warninguri
-  (void)soap;
-  (void)password;
-
-  // returnam cod de succes (0 = totul a mers bine)
-  *result = 0;
-  return SOAP_OK;
+// construieste shingle-uri (ferestre de k tokeni) si le hashuieste
+// returneaza numarul de shingle-uri unice
+int build_shingles(char tokens[][64], int token_count, unsigned long *shingles,
+                   int max_shingles) {
+  int count = 0;
+  for (int i = 0; i <= token_count - SHINGLE_K && count < max_shingles; i++) {
+    unsigned long h = 5381;
+    for (int j = 0; j < SHINGLE_K; j++) {
+      for (const char *c = tokens[i + j]; *c; c++) {
+        h = ((h << 5) + h) + (unsigned char)*c;
+      }
+    }
+    // sem deduplicare - pastram toate shingle-urile
+    shingles[count++] = h;
+  }
+  return count;
 }
 
-// implementarea serviciului soap login - autentifica un utilizator
-int ns__login(struct soap *soap, char *username, char *password, char **token) {
-  // logam autentificarea utilizatorului
-  char buf[BUFFER_SIZE];
-  snprintf(buf, sizeof(buf), "User logat %s", username);
-  logger_log(buf);
-
-  // marcam parametrul nefolosit explicit
-  (void)password;
-
-  // alocam memorie si returnam un token de sesiune
-  *token = (char *)soap_malloc(soap, BUFFER_SIZE);
-  strncpy(*token, "token", BUFFER_SIZE - 1);
-  (*token)[BUFFER_SIZE - 1] = '\0';
-  return SOAP_OK;
+// functia executata de fiecare thread in parte.
+// thread-ul main v-a creea cate un thread nou de token-izare per fisier si va
+// astepta rezultatul obtinut de la fiecare inainte de computarea report-ului
+void *tokenize_thread(void *arg) {
+  TokenizeArgs *a = (TokenizeArgs *)arg;
+  a->token_count = tokenize_and_stem(a->data, a->size, (char (*)[64])a->tokens,
+                                     a->max_tokens);
+  a->shingle_count = build_shingles((char (*)[64])a->tokens, a->token_count,
+                                    a->shingles, a->max_shingles);
+  printf("[SERVER] [thread] Fisier analizat: %s (%d tokeni, %d shingle-uri)\n",
+         a->filename, a->token_count, a->shingle_count);
+  return NULL;
 }
 
-int ns__uploadFile(struct soap *soap, char *filename, struct xsd__base64Binary fileData, int *result) {
-    printf("[SERVER] Fisier primit: %s (%d bytes)\n", filename, fileData.__size);
-    *result = 0;
+// calculeaza similaritatea Jaccard intre doua seturi de shingle-uri
+// rezultatul este un numar intre 0.0 (complet diferite) si 1.0 (identice)
+static double jaccard(unsigned long *a, int na, unsigned long *b, int nb) {
+  int intersect = 0;
+  char *used = calloc(nb, sizeof(char));
+
+  for (int i = 0; i < na; i++) {
+    for (int j = 0; j < nb; j++) {
+      if (!used[j] && a[i] == b[j]) {
+        intersect++;
+        used[j] = 1;
+        break;
+      }
+    }
+  }
+  free(used);
+
+  int uni = na + nb - intersect;
+  if (uni == 0)
+    return 0.0;
+  return (double)intersect / (double)uni;
+}
+
+// implementarea serviciului soap analyzeFiles
+// primeste un array de fisiere, le analizeaza si returneaza raportul de plagiat
+// fiecare fisier este token-izat intr-un thread separat, in paralel
+int ns__analyzeFiles(struct soap *soap, struct ns__ArrayOfFiles files,
+                     char **report) {
+  int n = files.__size;
+
+  if (n < 2) {
+    *report = soap_strdup(
+        soap, "Sunt necesare cel putin 2 fisiere pentru comparatie.\n");
     return SOAP_OK;
+  }
+
+  // alocam memoria pentru tokeni, shingle-uri, threaduri si argumente
+  char (*tokens)[MAX_TOKENS][64] = malloc(n * sizeof(*tokens));
+  int *token_counts = malloc(n * sizeof(int));
+  unsigned long (*shingles)[MAX_SHINGLES] = malloc(n * sizeof(*shingles));
+  int *shingle_counts = malloc(n * sizeof(int));
+
+  // avem un array de n thread-uri, cate unul pentru fiecare fisier
+  pthread_t *threads = malloc(n * sizeof(pthread_t));
+  TokenizeArgs *args = malloc(n * sizeof(TokenizeArgs));
+
+  if (!tokens || !token_counts || !shingles || !shingle_counts || !threads ||
+      !args) {
+    free(tokens);
+    free(token_counts);
+    free(shingles);
+    free(shingle_counts);
+    free(threads);
+    free(args);
+    return soap_receiver_fault(soap, "Memorie insuficienta pe server", NULL);
+  }
+
+  // pornim cate un thread pentru fiecare fisier
+  for (int i = 0; i < n; i++) {
+    args[i].data = files.__ptr[i].data.__ptr;
+    args[i].size = files.__ptr[i].data.__size;
+    args[i].tokens = (char (*)[64])tokens[i];
+    args[i].max_tokens = MAX_TOKENS;
+    args[i].shingles = shingles[i];
+    args[i].max_shingles = MAX_SHINGLES;
+    args[i].filename = files.__ptr[i].filename;
+    pthread_create(&threads[i], NULL, tokenize_thread, &args[i]);
+  }
+
+  // asteptam ca toate thread-urile sa termine
+  for (int i = 0; i < n; i++) {
+    pthread_join(threads[i], NULL);
+    token_counts[i] = args[i].token_count;
+    shingle_counts[i] = args[i].shingle_count;
+  }
+
+  // construim raportul cu similaritatea Jaccard pentru fiecare pereche
+  int bufsize = 65536;
+  char *buf = malloc(bufsize);
+  int pos = 0;
+  pos += snprintf(buf + pos, bufsize - pos,
+                  "=== Raport Detectare Plagiat ===\n"
+                  "Fisiere analizate: %d\n\n",
+                  n);
+
+  for (int i = 0; i < n; i++) {
+    for (int j = i + 1; j < n; j++) {
+      double sim = jaccard(shingles[i], shingle_counts[i], shingles[j],
+                           shingle_counts[j]);
+      pos += snprintf(buf + pos, bufsize - pos, "%s <-> %s : %.1f%%\n",
+                      files.__ptr[i].filename, files.__ptr[j].filename,
+                      sim * 100.0);
+    }
+  }
+
+  char logbuf[BUFFER_SIZE];
+  snprintf(logbuf, sizeof(logbuf), "Raport generat pentru %d fisiere", n);
+  logger_log(logbuf);
+
+  *report = soap_strdup(soap, buf);
+  free(buf);
+  free(tokens);
+  free(token_counts);
+  free(shingles);
+  free(shingle_counts);
+  free(threads);
+  free(args);
+
+  return SOAP_OK;
 }
 
 // initializeaza sistemul de logging folosind fork si pipe
@@ -124,9 +241,8 @@ void logger_init(const char *log_dir) {
 
   // cream un pipe pentru comunicarea intre procesul principal si cel de logging
   int pipe_fds[2];
-  if (pipe(pipe_fds) < 0) {
+  if (pipe(pipe_fds) < 0)
     return;
-  }
 
   // facem fork: procesul copil va scrie in fisierul de log
   pid_t pid = fork();
@@ -137,21 +253,20 @@ void logger_init(const char *log_dir) {
   }
 
   if (pid == 0) {
-    // procesul copil: inchidem capatul de scriere, nu avem nevoie de el
+    // procesul copil: inchidem capatul de scriere
     close(pipe_fds[1]);
 
     // construim numele fisierului de log pe baza datei si orei curente
     char filename[BUFFER_SIZE];
     time_t now = time(NULL);
     struct tm *tm_info = localtime(&now);
-
     char time_str[64];
     strftime(time_str, sizeof(time_str), "%Y-%m-%d_%H-%M-%S.log", tm_info);
     snprintf(filename, sizeof(filename), "%s/%s", log_dir, time_str);
 
     // deschidem fisierul de log pentru scriere
     FILE *f = fopen(filename, "w");
-    if (f == NULL) {
+    if (!f) {
       close(pipe_fds[0]);
       _exit(1);
     }
@@ -165,7 +280,7 @@ void logger_init(const char *log_dir) {
       fflush(f);
     }
 
-    // inchidem fisierul si capatul de citire, apoi iesim din procesul copil
+    // inchidem fisierul si iesim din procesul copil
     fclose(f);
     close(pipe_fds[0]);
     _exit(0);
@@ -179,9 +294,8 @@ void logger_init(const char *log_dir) {
 // scrie un mesaj in log cu timestamp-ul curent
 void logger_log(const char *msg) {
   // daca pipe-ul nu e initializat, nu facem nimic
-  if (log_fd < 0) {
+  if (log_fd < 0)
     return;
-  }
 
   // generam timestamp-ul curent
   char timestamp[BUFFER_SIZE];
@@ -204,28 +318,23 @@ void start_server(int port, const char *log_dir) {
   struct soap soap;
   soap_init(&soap);
 
-  // pornim sistemul de logging (creeaza procesul copil)
+  // pornim sistemul de logging
   logger_init(log_dir);
 
-  // facem bind pe portul configurat, cu backlog de 100 conexiuni
+  // facem bind pe portul configurat
   if (soap_bind(&soap, NULL, port, 100) < 0) {
     soap_print_fault(&soap, stderr);
     return;
   }
 
-  // afisam confirmarea pornirii si logam evenimentul
   printf("[SERVER] Server ruleaza pe port %d...\n", port);
   logger_log("Server initializat.");
 
-  // bucla principala: asteptam conexiuni si procesam cererile soap
+  // bucla principala: asteptam si procesam cereri soap
   while (1) {
-    // acceptam o conexiune noua de la un client
-    if (soap_accept(&soap) < 0) {
+    if (soap_accept(&soap) < 0)
       break;
-    }
-    // procesam cererea soap primita
     soap_serve(&soap);
-    // eliberam resursele alocate pentru cererea curenta
     soap_end(&soap);
   }
 
