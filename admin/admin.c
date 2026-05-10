@@ -73,7 +73,7 @@ void admin_log(AdminClient *client, const char *msg) {
   client->log_count++;
 }
 
-static void draw_box(int y, int x, int h, int w, const char *title) {
+void draw_box(int y, int x, int h, int w, const char *title) {
   attron(COLOR_PAIR(COLOR_PAIR_BORDER));
   mvhline(y, x + 1, ACS_HLINE, w - 2);
   mvhline(y + h - 1, x + 1, ACS_HLINE, w - 2);
@@ -94,8 +94,8 @@ static void draw_box(int y, int x, int h, int w, const char *title) {
   }
 }
 
-static void draw_control_row(int y, int x, int w, const char *label,
-                             const char *value, int selected, int enabled) {
+void draw_control_row(int y, int x, int w, const char *label, const char *value,
+                      int selected, int enabled) {
   mvhline(y, x, ' ', w);
 
   if (selected) {
