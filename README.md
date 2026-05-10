@@ -45,3 +45,44 @@ stack_original.c <-> stack_palg.c : 59.9%
 stack_original.c <-> other_stack.c : 4.0%
 stack_palg.c <-> other_stack.c : 1.0%
 ```
+
+## Checks
+
+### Nivel A
+
+Falg-uri compilare:
+
+```sh
+gcc -Wall -Wextra -Wpedantic -Werror -g -std=c11 -D_POSIX_C_SOURCE=200809L server.c -o server
+```
+
+### Nivel B
+
+Flag-uri compilare
+
+```sh
+gcc -Wall -Wextra -Wpedantic -g -std=c11 -D_POSIX_C_SOURCE=200809L -pthread server.c -o server
+```
+
+Memcheck
+
+```sh
+valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes ./server
+```
+
+Helgrind 
+
+```sh
+valgrind --tool=helgrind ./server
+```
+
+Address & Leak Sanitizer
+
+```sh
+gcc -g -O0 -fno-omit-frame-pointer -fsanitize=address,leak,undefined server.c -o server 
+```
+Thread Sanitizer
+
+```sh
+gcc -g -O0 -fno-omit-frame-pointer -fsanitize=thread -pthread server.c -o server 
+```
