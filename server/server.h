@@ -1,7 +1,6 @@
 #ifndef SERVER_H
 #define SERVER_H
 
-#include <libconfig.h>
 
 // Includem starea partajata cu admin clientul
 #include "../server_state.h"
@@ -14,11 +13,12 @@
 #define SHINGLE_K_DEFAULT 3
 // numarul maxim de shingle-uri unice per fisier
 #define MAX_SHINGLES 65536
-
+#define LOG_DIR_SIZE 256
+#define TOKEN_SIZE 64
 // structura care retine configuratia serverului
 typedef struct {
   int port;          // portul pe care asculta serverul
-  char log_dir[256]; // directorul unde se salveaza log-urile
+  char log_dir[LOG_DIR_SIZE]; // directorul unde se salveaza log-urile
 } ServerConfig;
 
 // datele de intrare ale fiecarui thread folosite mai departe pentru a realiza
@@ -26,7 +26,7 @@ typedef struct {
 typedef struct {
   const unsigned char *data; // continutul fisierului
   int size;                  // dimensiunea fisierului
-  char (*tokens)[64];        // array de tokeni stemati
+  char (*tokens)[TOKEN_SIZE];        // array de tokeni stemati
   int max_tokens;            // limita de tokeni
   int token_count;           // rezultat: cati tokeni s-au gasit
   unsigned long *shingles;   // array de shingle-uri

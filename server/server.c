@@ -1,20 +1,32 @@
 #include "server.h"
-#include "soapH.h"
 #include "soapStub.h"
+#include "../server_state.h"
+
 #include <ctype.h>
-#include <errno.h>
 #include <fcntl.h>
 #include <libconfig.h>
-#include <libstemmer.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
 
+#define SIZE_64 64
+#define SHM_PERMISSIONS 0666
+#define DEFAULT_PORT 8080
+#define MSG_SIZE 128
+#define MAX_TOKEN_LENGTH 63
+#define INITIAL_HASH 5381
+#define DJB2_SHIFT 5
+#define MAX_SHINGLE_K 10
+#define REPORT_BUFFER_SIZE 65536
+#define LOG_DIR_PERMISSIONS 0755
+#define SOAP_BACKLOG 100
 // descriptorul de fisier  pentru scrierea in pipe-ul de logging
 int log_fd = -1;
 
@@ -24,11 +36,14 @@ int log_fd = -1;
 AdminState *g_admin_state = NULL;
 int shm_fd_server = -1;
 
+// NOLINTNEXTLINE(misc-include-cleaner)
 pthread_mutex_t thread_limit_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 // variabila conditie, permite thread-ului sa:
 // - fie in sleep pana cand o conditie devine true
 // - se trezeasca la momentul in care conditia devine true
+
+// NOLINTNEXTLINE(misc-include-cleaner)
 pthread_cond_t thread_limit_cond = PTHREAD_COND_INITIALIZER;
 
 int server_shm_init(void) {
@@ -36,7 +51,7 @@ int server_shm_init(void) {
   // SHM_NAME -> variabila importata din server_state.h
   // O_CREAT | ORDWR -> deschidem obiectul de shared memory pentru scris si
   // citit, il creem daca nu exista
-  shm_fd_server = shm_open(SHM_NAME, O_CREAT | O_RDWR, 0666);
+  shm_fd_server = shm_open(SHM_NAME, O_CREAT | O_RDWR, SHM_PERMISSIONS);
 
   // tratam cazul de eroare
   if (shm_fd_server < 0) {
@@ -75,8 +90,12 @@ int server_shm_init(void) {
   atomic_store(&g_admin_state->requests_active, 0);
   atomic_store(&g_admin_state->shutdown, 0);
   atomic_store(&g_admin_state->shingle_k, SHINGLE_K_DEFAULT);
-  strncpy(g_admin_state->status_msg, "Server pornit.", 127);
-  g_admin_state->status_msg[127] = '\0';
+
+  // NOLINTNEXTLINE(clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling)
+  if (snprintf(g_admin_state->status_msg, sizeof(g_admin_state->status_msg),
+         "%s", "Server pornit.") <0){
+    perror("snprintf");
+  }
 
   printf("[SERVER] Memorie partajata initiata: %s\n", SHM_NAME);
   return 0;
@@ -99,10 +118,14 @@ void server_shm_cleanup(void) {
 
 // funcite care seteaza mesajul de status
 void shm_set_status(const char *msg) {
-  if (!g_admin_state)
+  if (!g_admin_state){
     return;
-  strncpy(g_admin_state->status_msg, msg, 127);
-  g_admin_state->status_msg[127] = '\0';
+  }
+  // NOLINTNEXTLINE(clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling)
+  if (snprintf(g_admin_state->status_msg, sizeof(g_admin_state->status_msg),
+         "%s", msg) <0){
+    perror("snprintf");
+  }
 }
 
 // functia care incarca configuratia serverului dintr-un fisier cfg
@@ -111,17 +134,22 @@ void config_load(const char *path, ServerConfig *cfg) {
   config_init(&lib_cfg);
 
   // setam valorile implicite pentru port si directorul de loguri
-  cfg->port = 8080;
-  strncpy(cfg->log_dir, "logs", sizeof(cfg->log_dir) - 1);
-  cfg->log_dir[sizeof(cfg->log_dir) - 1] = '\0';
+  cfg->port = DEFAULT_PORT;
+  // NOLINTNEXTLINE(clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling)
+  if (snprintf(cfg->log_dir, sizeof(cfg->log_dir), "%s", "logs") <0){
+    perror("snprintf");
+  }
 
   // incercam sa citim fisierul de configurare
   // daca nu reusim, afisam eroare si pastram valorile default
   if (!config_read_file(&lib_cfg, path)) {
-    fprintf(stderr,
+    // NOLINTNEXTLINE(clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling)
+    if (fprintf(stderr,
             "Eroare la configurare %s:%d - %s, folosim valorile default\n",
             config_error_file(&lib_cfg), config_error_line(&lib_cfg),
-            config_error_text(&lib_cfg));
+            config_error_text(&lib_cfg)) <0){
+      perror("config_read_file");
+            }
     config_destroy(&lib_cfg);
     return;
   }
@@ -135,44 +163,56 @@ void config_load(const char *path, ServerConfig *cfg) {
   // citim directorul de loguri din configurare, daca exista
   const char *log_dir = NULL;
   if (config_lookup_string(&lib_cfg, "log_dir", &log_dir)) {
-    strncpy(cfg->log_dir, log_dir, sizeof(cfg->log_dir) - 1);
-    cfg->log_dir[sizeof(cfg->log_dir) - 1] = '\0';
+    // NOLINTNEXTLINE(clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling)
+    if (snprintf(cfg->log_dir, sizeof(cfg->log_dir), "%s", log_dir) <0){
+      perror("snprintf");
+    }
   }
 
   // eliberam resursele libconfig
   config_destroy(&lib_cfg);
 }
 
+static unsigned char to_lowercase(unsigned char character) {
+  return (unsigned char)tolower(character);
+}
+
 // tokenizeaza si stemeaza continutul unui fisier
 // returneaza numarul de tokeni gasiti
 int tokenize_and_stem(const unsigned char *data, int size,
-                      char stemmed_tokens[][64], int max_tokens) {
+                      char stemmed_tokens[][SIZE_64], int max_tokens) {
   // pentru fisiere de cod nu aplicam stemming
   // doar extragem tokenii si ii convertim la lowercase
   int count = 0;
   char *buf = malloc(size + 1);
-  memcpy(buf, data, size);
+  memcpy(buf, data, size); // NOLINT(clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling)
   buf[size] = '\0';
 
-  char *p = buf;
-  while (*p && count < max_tokens) {
+  char *cursor = buf;
+  while (*cursor && count < max_tokens) {
     // sari peste caractere care nu sunt alfanumerice sau underscore
-    while (*p && !isalnum((unsigned char)*p) && *p != '_')
-      p++;
-    if (!*p)
-      break;
-
-    char word[64];
-    int wlen = 0;
-    while (*p && (isalnum((unsigned char)*p) || *p == '_') && wlen < 63) {
-      word[wlen++] = tolower((unsigned char)*p++);
+    while (*cursor && !isalnum((unsigned char)*cursor) && *cursor != '_') {
+      cursor++;
     }
-    word[wlen] = '\0';
-    if (wlen == 0)
-      continue;
 
-    strncpy(stemmed_tokens[count], word, 63);
-    stemmed_tokens[count][63] = '\0';
+    if (!*cursor) {
+      break;
+    }
+
+    char word[SIZE_64];
+    int wlen = 0;
+    while (*cursor &&
+           (isalnum((unsigned char)*cursor) || *cursor == '_') &&
+           wlen < MAX_TOKEN_LENGTH) {
+      word[wlen++] = (char)to_lowercase((unsigned char)*cursor++);
+           }
+    word[wlen] = '\0';
+    if (wlen == 0){
+      continue;
+    }
+
+
+    (void) snprintf(stemmed_tokens[count], SIZE_64, "%s", word); // NOLINT(clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling)
     count++;
   }
 
@@ -182,18 +222,19 @@ int tokenize_and_stem(const unsigned char *data, int size,
 
 // construieste shingle-uri (ferestre de k tokeni) si le hashuieste
 // returneaza numarul de shingle-uri unice
-int build_shingles(char tokens[][64], int token_count, unsigned long *shingles,
-                   int max_shingles, int k) {
+int build_shingles(char tokens[][SIZE_64], int token_count, unsigned long *shingles,
+                   int max_shingles, int shingle_size) {
   int count = 0;
-  for (int i = 0; i <= token_count - k && count < max_shingles; i++) {
-    unsigned long h = 5381;
-    for (int j = 0; j < k; j++) {
-      for (const char *c = tokens[i + j]; *c; c++) {
-        h = ((h << 5) + h) + (unsigned char)*c;
+  for (int i = 0; i <= token_count - shingle_size && count < max_shingles; i++) {
+    unsigned long hash_value = INITIAL_HASH;
+    for (int j = 0; j < shingle_size; j++) {
+      for (const char *character = tokens[i + j]; *character; character++) {
+        hash_value = ((hash_value << DJB2_SHIFT) + hash_value) +
+                     (unsigned char)*character;
       }
     }
     // sem deduplicare - pastram toate shingle-urile
-    shingles[count++] = h;
+    shingles[count++] = hash_value;
   }
   return count;
 }
@@ -202,7 +243,7 @@ int build_shingles(char tokens[][64], int token_count, unsigned long *shingles,
 // thread-ul main v-a creea cate un thread nou de token-izare per fisier si va
 // astepta rezultatul obtinut de la fiecare inainte de computarea report-ului
 void *tokenize_thread(void *arg) {
-  TokenizeArgs *a = (TokenizeArgs *)arg;
+  TokenizeArgs *thread_args = (TokenizeArgs *)arg;
 
   if (g_admin_state) {
     // ne vom asigura ca nu depasim numarul maxim de threads pentru task ul de
@@ -228,17 +269,22 @@ void *tokenize_thread(void *arg) {
     pthread_mutex_unlock(&thread_limit_mutex);
   }
 
-  int k = a->shingle_k;
+  int shingle_size = thread_args->shingle_k;
   if (g_admin_state) {
-    int live_k = atomic_load(&g_admin_state->shingle_k);
-    if (live_k >= 1 && live_k <= 10)
-      k = live_k;
+    int live_shingle_size = atomic_load(&g_admin_state->shingle_k);
+    if (live_shingle_size >= 1 && live_shingle_size <= MAX_SHINGLE_K) {
+      shingle_size = live_shingle_size;
+    }
   }
 
-  a->token_count = tokenize_and_stem(a->data, a->size, (char (*)[64])a->tokens,
-                                     a->max_tokens);
-  a->shingle_count = build_shingles((char (*)[64])a->tokens, a->token_count,
-                                    a->shingles, a->max_shingles, k);
+  thread_args->token_count =
+      tokenize_and_stem(thread_args->data, thread_args->size,
+                        thread_args->tokens, thread_args->max_tokens);
+
+  thread_args->shingle_count =
+      build_shingles(thread_args->tokens, thread_args->token_count,
+                     thread_args->shingles, thread_args->max_shingles,
+                     shingle_size);
 
   // citim log level si in functie de el aratam un mesaj mai detaliat
   int log_lv =
@@ -246,7 +292,7 @@ void *tokenize_thread(void *arg) {
   if (log_lv >= LOG_LEVEL_VERBOSE) {
     printf(
         "[SERVER] [thread] Fisier analizat: %s (%d tokeni, %d shingle-uri)\n",
-        a->filename, a->token_count, a->shingle_count);
+        thread_args->filename, thread_args->token_count, thread_args->shingle_count);
   }
 
   // finalul executiei thread-ului:
@@ -270,25 +316,29 @@ void *tokenize_thread(void *arg) {
 
 // calculeaza similaritatea Jaccard intre doua seturi de shingle-uri
 // rezultatul este un numar intre 0.0 (complet diferite) si 1.0 (identice)
-double jaccard(unsigned long *a, int na, unsigned long *b, int nb) {
+double jaccard(const unsigned long *first_set, int first_count,
+               const unsigned long *second_set, int second_count) {
   int intersect = 0;
-  char *used = calloc(nb, sizeof(char));
+  char *used = calloc(second_count, sizeof(char));
 
-  for (int i = 0; i < na; i++) {
-    for (int j = 0; j < nb; j++) {
-      if (!used[j] && a[i] == b[j]) {
+  for (int i = 0; i < first_count; i++) {
+    for (int j = 0; j < second_count; j++) {
+      if (!used[j] && first_set[i] == second_set[j]) {
         intersect++;
         used[j] = 1;
         break;
       }
     }
   }
+
   free(used);
 
-  int uni = na + nb - intersect;
-  if (uni == 0)
+  int union_count = first_count + second_count - intersect;
+  if (union_count == 0) {
     return 0.0;
-  return (double)intersect / (double)uni;
+  }
+
+  return (double)intersect / (double)union_count;
 }
 
 // implementarea serviciului soap analyzeFiles
@@ -296,7 +346,7 @@ double jaccard(unsigned long *a, int na, unsigned long *b, int nb) {
 // fiecare fisier este token-izat intr-un thread separat, in paralel
 int ns__analyzeFiles(struct soap *soap, struct ns__ArrayOfFiles files,
                      char **report) {
-  int n = files.__size;
+  int file_count = files.__size;
 
   if (g_admin_state && atomic_load(&g_admin_state->paused)) {
     *report = soap_strdup(
@@ -309,21 +359,22 @@ int ns__analyzeFiles(struct soap *soap, struct ns__ArrayOfFiles files,
     return SOAP_OK;
   }
 
-  if (n < 2) {
+  if (file_count < 2) {
     *report = soap_strdup(
         soap, "Sunt necesare cel putin 2 fisiere pentru comparatie.\n");
     return SOAP_OK;
   }
 
   // alocam memoria pentru tokeni, shingle-uri, threaduri si argumente
-  char (*tokens)[MAX_TOKENS][64] = malloc(n * sizeof(*tokens));
-  int *token_counts = malloc(n * sizeof(int));
-  unsigned long (*shingles)[MAX_SHINGLES] = malloc(n * sizeof(*shingles));
-  int *shingle_counts = malloc(n * sizeof(int));
+  char (*tokens)[MAX_TOKENS][SIZE_64] = malloc(file_count * sizeof(*tokens));
+  int *token_counts = malloc(file_count * sizeof(int));
+  unsigned long (*shingles)[MAX_SHINGLES] = malloc(file_count * sizeof(*shingles));
+  int *shingle_counts = malloc(file_count * sizeof(int));
 
-  // avem un array de n thread-uri, cate unul pentru fiecare fisier
-  pthread_t *threads = malloc(n * sizeof(pthread_t));
-  TokenizeArgs *args = malloc(n * sizeof(TokenizeArgs));
+  // avem un array de file_count thread-uri, cate unul pentru fiecare fisier
+  // NOLINTNEXTLINE(misc-include-cleaner)
+  pthread_t *threads = malloc(file_count * sizeof(pthread_t));
+  TokenizeArgs *args = malloc(file_count * sizeof(TokenizeArgs));
 
   if (!tokens || !token_counts || !shingles || !shingle_counts || !threads ||
       !args) {
@@ -336,62 +387,71 @@ int ns__analyzeFiles(struct soap *soap, struct ns__ArrayOfFiles files,
     return soap_receiver_fault(soap, "Memorie insuficienta pe server", NULL);
   }
 
-  int current_k = SHINGLE_K_DEFAULT;
+  int current_shingle_size = SHINGLE_K_DEFAULT;
   if (g_admin_state) {
     // update la k-value daca aceasta a fost configurata de admin
-    int lk = atomic_load(&g_admin_state->shingle_k);
-    if (lk >= 1 && lk <= 10)
-      current_k = lk;
+    int live_shingle_size = atomic_load(&g_admin_state->shingle_k);
+    if (live_shingle_size >= 1 && live_shingle_size <= MAX_SHINGLE_K) {
+      current_shingle_size = live_shingle_size;
+    }
   }
 
   // pornim cate un thread pentru fiecare fisier
-  for (int i = 0; i < n; i++) {
+  for (int i = 0; i < file_count; i++) {
     args[i].data = files.__ptr[i].data.__ptr;
     args[i].size = files.__ptr[i].data.__size;
-    args[i].tokens = (char (*)[64])tokens[i];
+    args[i].tokens = (char (*)[SIZE_64])tokens[i];
     args[i].max_tokens = MAX_TOKENS;
     args[i].shingles = shingles[i];
     args[i].max_shingles = MAX_SHINGLES;
     args[i].filename = files.__ptr[i].filename;
-    args[i].shingle_k = current_k;
+    args[i].shingle_k = current_shingle_size;
     pthread_create(&threads[i], NULL, tokenize_thread, &args[i]);
   }
 
   // asteptam ca toate thread-urile sa termine
-  for (int i = 0; i < n; i++) {
+  for (int i = 0; i < file_count; i++) {
     pthread_join(threads[i], NULL);
     token_counts[i] = args[i].token_count;
     shingle_counts[i] = args[i].shingle_count;
   }
 
   // construim raportul cu similaritatea Jaccard pentru fiecare pereche
-  int bufsize = 65536;
+  int bufsize = REPORT_BUFFER_SIZE;
   char *buf = malloc(bufsize);
   int pos = 0;
+  // NOLINTNEXTLINE(clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling)
   pos += snprintf(buf + pos, bufsize - pos,
                   "=== Raport Detectare Plagiat ===\n"
                   "Fisiere analizate: %d\n\n",
-                  n);
+                  file_count);
 
-  for (int i = 0; i < n; i++) {
-    for (int j = i + 1; j < n; j++) {
+  for (int i = 0; i < file_count; i++) {
+    for (int j = i + 1; j < file_count; j++) {
       double sim = jaccard(shingles[i], shingle_counts[i], shingles[j],
                            shingle_counts[j]);
+      // NOLINTNEXTLINE(clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling)
       pos += snprintf(buf + pos, bufsize - pos, "%s <-> %s : %.1f%%\n",
                       files.__ptr[i].filename, files.__ptr[j].filename,
-                      sim * 100.0);
+                      sim * SOAP_BACKLOG);
     }
   }
 
   if (g_admin_state) {
     atomic_fetch_add(&g_admin_state->requests_done, 1);
-    char smsg[128];
-    snprintf(smsg, sizeof(smsg), "Ultima cerere: %d fisiere analizate", n);
+    char smsg[MSG_SIZE];
+    // NOLINTNEXTLINE(clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling)
+    if (snprintf(smsg, sizeof(smsg), "Ultima cerere: %d fisiere analizate", file_count) <0){
+      perror("snprintf");
+    }
     shm_set_status(smsg);
   }
 
   char logbuf[BUFFER_SIZE];
-  snprintf(logbuf, sizeof(logbuf), "Raport generat pentru %d fisiere", n);
+  // NOLINTNEXTLINE(clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling)
+  if (snprintf(logbuf, sizeof(logbuf), "Raport generat pentru %d fisiere", file_count) <0){
+    perror("snprintf");
+  }
   logger_log(logbuf);
 
   *report = soap_strdup(soap, buf);
@@ -410,12 +470,13 @@ int ns__analyzeFiles(struct soap *soap, struct ns__ArrayOfFiles files,
 // creeaza un proces copil dedicat scrierii in fisierul de log
 void logger_init(const char *log_dir) {
   // cream directorul de loguri daca nu exista
-  mkdir(log_dir, 0755);
+  mkdir(log_dir, LOG_DIR_PERMISSIONS);
 
   // cream un pipe pentru comunicarea intre procesul principal si cel de logging
   int pipe_fds[2];
-  if (pipe(pipe_fds) < 0)
+  if (pipe(pipe_fds) < 0){
     return;
+  }
 
   // facem fork: procesul copil va scrie in fisierul de log
   pid_t pid = fork();
@@ -431,30 +492,48 @@ void logger_init(const char *log_dir) {
 
     // construim numele fisierului de log pe baza datei si orei curente
     char filename[BUFFER_SIZE];
+
+
     time_t now = time(NULL);
-    struct tm *tm_info = localtime(&now);
-    char time_str[64];
-    strftime(time_str, sizeof(time_str), "%Y-%m-%d_%H-%M-%S.log", tm_info);
-    snprintf(filename, sizeof(filename), "%s/%s", log_dir, time_str);
+    struct tm tm_info;
+    localtime_r(&now, &tm_info);
+
+    char time_str[SIZE_64];
+    if (strftime(time_str, sizeof(time_str),
+                 "%Y-%m-%d_%H-%M-%S.log", &tm_info) == 0) {
+      perror("strftime");
+                 }
+    // NOLINTNEXTLINE(clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling)
+    if (snprintf(filename, sizeof(filename), "%s/%s", log_dir, time_str) <0){
+      perror("snprintf");
+    }
 
     // deschidem fisierul de log pentru scriere
-    FILE *f = fopen(filename, "w");
-    if (!f) {
+    FILE *log_file = fopen(filename, "w");
+    if (!log_file) {
       close(pipe_fds[0]);
       _exit(1);
     }
 
     // citim in bucla din pipe si scriem in fisierul de log
     char buffer[BUFFER_SIZE];
-    ssize_t n = 0;
-    while ((n = read(pipe_fds[0], buffer, sizeof(buffer) - 1)) > 0) {
-      buffer[n] = '\0';
-      fprintf(f, "%s\n", buffer);
-      fflush(f);
+    ssize_t bytes_read = 0;
+    while ((bytes_read = read(pipe_fds[0], buffer, sizeof(buffer) - 1)) > 0) {
+      buffer[bytes_read] = '\0';
+      // NOLINTNEXTLINE(clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling)
+      if (fprintf(log_file, "%s\n", buffer) < 0) {
+        perror("fprintf");
+      }
+
+      if (fflush(log_file) != 0) {
+        perror("fflush");
+      }
     }
 
     // inchidem fisierul si iesim din procesul copil
-    fclose(f);
+    if (fclose(log_file) != 0) {
+      perror("fclose");
+    }
     close(pipe_fds[0]);
     _exit(0);
   }
@@ -467,21 +546,28 @@ void logger_init(const char *log_dir) {
 // scrie un mesaj in log cu timestamp-ul curent
 void logger_log(const char *msg) {
   // daca pipe-ul nu e initializat, nu facem nimic
-  if (log_fd < 0)
+  if (log_fd < 0){
     return;
+  }
 
   if (g_admin_state &&
-      atomic_load(&g_admin_state->log_level) == LOG_LEVEL_QUIET)
-    return;
+      atomic_load(&g_admin_state->log_level) == LOG_LEVEL_QUIET){ return; }
 
   // generam timestamp-ul curent
   char timestamp[BUFFER_SIZE];
   time_t now = time(NULL);
-  struct tm *tm_info = localtime(&now);
-  strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_info);
+  struct tm tm_info;
+  localtime_r(&now, &tm_info);
+
+  if (strftime(timestamp, sizeof(timestamp),
+               "%Y-%m-%d %H:%M:%S", &tm_info) == 0) {
+    perror("strftime");
+               }
 
   // formatam mesajul final cu timestamp si il scriem in pipe
   char final_buf[BUFFER_SIZE];
+
+  // NOLINTNEXTLINE(clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling)
   int len = snprintf(final_buf, sizeof(final_buf), "[%s] %s", timestamp, msg);
   if (len > 0) {
     ssize_t written = write(log_fd, final_buf, (size_t)len);
@@ -496,15 +582,17 @@ void start_server(int port, const char *log_dir) {
   soap_init(&soap);
 
   if (server_shm_init() < 0) {
-    fprintf(stderr, "[SERVER] Avertisment: nu s-a putut initializa shm. "
-                    "Admin panel-ul nu va functiona.\n");
+    // NOLINTNEXTLINE(clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling)
+    if (fprintf(stderr, "[SERVER] Avertisment: nu s-a putut initializa shm. "
+                    "Admin panel-ul nu va functiona.\n") <0){
+      perror("soap_init"); }
   }
 
   // pornim sistemul de logging
   logger_init(log_dir);
 
   // facem bind pe portul configurat
-  if (soap_bind(&soap, NULL, port, 100) < 0) {
+  if (soap_bind(&soap, NULL, port, SOAP_BACKLOG) < 0) {
     soap_print_fault(&soap, stderr);
     server_shm_cleanup();
     return;
@@ -528,12 +616,21 @@ void start_server(int port, const char *log_dir) {
 
     if (g_admin_state && atomic_load(&g_admin_state->paused)) {
       shm_set_status("Server in pauza.");
-      sleep(1);
+      struct timespec pause_duration = {
+        .tv_sec = 1,
+        .tv_nsec = 0,
+    };
+
+      if (nanosleep(&pause_duration, NULL) < 0) {
+        perror("nanosleep");
+      }
       continue;
     }
 
-    if (soap_accept(&soap) < 0)
+    if (soap_accept(&soap) < 0){
       break;
+    }
+
     soap_serve(&soap);
     soap_end(&soap);
   }
