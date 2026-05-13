@@ -4,6 +4,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#define ENDPOINT_SIZE 512
+
 int main(int argc, char *argv[]) {
   // incarcam configuratia clientului din fisierul cfg
   // config_load construieste si endpoint-ul global
@@ -11,8 +13,12 @@ int main(int argc, char *argv[]) {
   config_load("config/client.cfg", &cfg);
 
   // construim adresa endpoint-ului serverului
-  char endpoint[512];
-  snprintf(endpoint, sizeof(endpoint), "http://%s:%d", cfg.host, cfg.port);
+  char endpoint[ENDPOINT_SIZE];
+  // NOLINTNEXTLINE(clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling)
+  if (snprintf(endpoint, sizeof(endpoint), "http://%s:%d", cfg.host, cfg.port) < 0) {
+    perror("snprintf");
+    return 1;
+  }
 
   // definim argumentele acceptate din linia de comanda
   // -f pentru fisiere, -h pentru ajutor
@@ -24,7 +30,12 @@ int main(int argc, char *argv[]) {
 
   // verificam daca tabelul de argumente a fost alocat corect
   if (arg_nullcheck(argtable) != 0) {
-    fprintf(stderr, "error: insufficient memory\n");
+
+    // NOLINTNEXTLINE(clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling)
+    if (fprintf(stderr, "error: insufficient memory\n") < 0) {
+      perror("fprintf");
+    }
+
     arg_freetable(argtable, sizeof(argtable) / sizeof(argtable[0]));
     return 1;
   }

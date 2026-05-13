@@ -6,8 +6,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define ENDPOINT_SIZE 512
+#define DEFAULT_CLIENT_PORT 8080
 // endpoint-ul global al serverului, construit din host si port
-char g_endpoint[512];
+char g_endpoint[ENDPOINT_SIZE];
 
 // functia care incarca configuratia clientului dintr-un fisier cfg
 // si construieste endpoint-ul global
@@ -16,23 +18,34 @@ void config_load(const char *path, ClientConfig *cfg) {
   config_init(&lib_cfg);
 
   // setam valorile implicite pentru port si host
-  cfg->port = 8080;
-  strncpy(cfg->host, "localhost", sizeof(cfg->host) - 1);
-  cfg->host[sizeof(cfg->host) - 1] = '\0';
+  cfg->port = DEFAULT_CLIENT_PORT;
+  // NOLINTNEXTLINE(clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling)
+  if (snprintf(cfg->host, sizeof(cfg->host), "%s", "localhost") < 0) {
+    perror("snprintf");
+  }
 
   // incercam sa citim fisierul de configurare
   // daca nu reusim, afisam eroare si pastram valorile default
+
   if (!config_read_file(&lib_cfg, path)) {
-    fprintf(stderr,
-            "Eroare la configurare %s:%d - %s, folosim valorile default\n",
-            config_error_file(&lib_cfg), config_error_line(&lib_cfg),
-            config_error_text(&lib_cfg));
+    //NOLINTNEXTLINE(clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling)
+    if (fprintf(stderr,
+                "Eroare la configurare %s:%d - %s, folosim valorile default\n",
+                config_error_file(&lib_cfg), config_error_line(&lib_cfg),
+                config_error_text(&lib_cfg)) < 0) {
+      perror("fprintf");
+                }
+
     config_destroy(&lib_cfg);
-    snprintf(g_endpoint, sizeof(g_endpoint), "http://%s:%d", cfg->host,
-             cfg->port);
+
+    //NOLINTNEXTLINE(clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling)
+    if (snprintf(g_endpoint, sizeof(g_endpoint), "http://%s:%d", cfg->host,
+                 cfg->port) < 0) {
+      perror("snprintf");
+                 }
+
     return;
   }
-
   // citim portul din configurare, daca exista
   int port = 0;
   if (config_lookup_int(&lib_cfg, "port", &port)) {
@@ -42,14 +55,19 @@ void config_load(const char *path, ClientConfig *cfg) {
   // citim adresa host-ului din configurare, daca exista
   const char *host = NULL;
   if (config_lookup_string(&lib_cfg, "host", &host)) {
-    strncpy(cfg->host, host, sizeof(cfg->host) - 1);
-    cfg->host[sizeof(cfg->host) - 1] = '\0';
+    // NOLINTNEXTLINE(clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling)
+    if (snprintf(cfg->host, sizeof(cfg->host), "%s", host) < 0) {
+      perror("snprintf");
+    }
   }
 
   // eliberam resursele libconfig si construim endpoint-ul
   config_destroy(&lib_cfg);
-  snprintf(g_endpoint, sizeof(g_endpoint), "http://%s:%d", cfg->host,
-           cfg->port);
+  // NOLINTNEXTLINE(clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling)
+  if (snprintf(g_endpoint, sizeof(g_endpoint), "http://%s:%d", cfg->host,
+               cfg->port) < 0) {
+    perror("snprintf");
+               }
 }
 
 // trimite toate fisierele la server intr-un singur apel soap
@@ -65,6 +83,7 @@ void client_send_files(const char **filepaths, int count,
   for (int i = 0; i < count; i++) {
     FILE *f = fopen(filepaths[i], "rb");
     if (!f) {
+      // NOLINTNEXTLINE(clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling)
       fprintf(stderr, "[CLIENT] Nu pot deschide fisierul: %s\n", filepaths[i]);
       bufs[i] = NULL;
       continue;
@@ -75,12 +94,23 @@ void client_send_files(const char **filepaths, int count,
 
     bufs[actual] = malloc(size);
     if (!bufs[actual]) {
+      // NOLINTNEXTLINE(clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling)
       fprintf(stderr, "[CLIENT] Memorie insuficienta pentru: %s\n",
               filepaths[i]);
       fclose(f);
       continue;
     }
-    fread(bufs[actual], 1, size, f);
+    size_t bytes_read = fread(bufs[actual], 1, (size_t)size, f);
+    if (bytes_read != (size_t)size) {
+      // NOLINTNEXTLINE(clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling)
+      if (fprintf(stderr, "[CLIENT] Eroare la citirea fisierului: %s\n",
+                  filepaths[i]) < 0) {
+        perror("fprintf");
+                  }
+      free(bufs[actual]);
+      fclose(f);
+      continue;
+    }
     fclose(f);
 
     // extragem doar numele fisierului fara cale
@@ -99,9 +129,11 @@ void client_send_files(const char **filepaths, int count,
 
   // verificam ca avem cel putin 2 fisiere valide
   if (actual < 2) {
+    // NOLINTNEXTLINE(clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling)
     fprintf(stderr, "[CLIENT] Sunt necesare cel putin 2 fisiere valide.\n");
-    for (int i = 0; i < actual; i++)
+    for (int i = 0; i < actual; i++){
       free(bufs[i]);
+    }
     free(items);
     free(bufs);
     return;
@@ -123,6 +155,7 @@ void client_send_files(const char **filepaths, int count,
     // afisam raportul primit de la server
     printf("\n%s\n", report);
   } else {
+    // NOLINTNEXTLINE(clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling)
     fprintf(stderr, "[CLIENT] Eroare la analiza fisierelor\n");
     soap_print_fault(&soap, stderr);
   }
@@ -132,8 +165,9 @@ void client_send_files(const char **filepaths, int count,
   soap_end(&soap);
   soap_done(&soap);
 
-  for (int i = 0; i < actual; i++)
+  for (int i = 0; i < actual; i++){
     free(bufs[i]);
+  }
   free(items);
   free(bufs);
 }
