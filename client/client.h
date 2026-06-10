@@ -12,7 +12,7 @@ typedef struct {
 
 // incarca configuratia clientului din fisierul cfg
 void config_load(const char *path, ClientConfig *cfg);
-// trimite fisierele la server si afiseaza raportul primit
-void client_send_files(const char **filepaths, int count, const char *endpoint);
+// trimite fisierele la server si returneaza raportul primit ca sir de caractere
+char* client_send_files(const char **filepaths, int count, const char *endpoint);
 
 #endif

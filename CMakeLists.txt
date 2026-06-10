@@ -83,6 +83,7 @@ add_dependencies(server gsoap_gen_target)
 add_executable(client
     client/main.c
     client/client.c
+    client/tui.c
     ${GEN_DIR}/soapC.c
     ${GEN_DIR}/soapClient.c
 )
@@ -94,12 +95,15 @@ target_link_libraries(client PRIVATE
     OpenSSL::Crypto
     ZLIB::ZLIB
     libconfig::libconfig
+    Curses::Curses
+    pthread
 )
 
 target_include_directories(client PRIVATE
     ${GEN_DIR}
     client
     ${gsoap_INCLUDE_DIRS}
+    ${CURSES_INCLUDE_DIRS}
 )
 
 add_dependencies(client gsoap_gen_target)

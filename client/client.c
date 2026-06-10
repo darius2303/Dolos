@@ -72,7 +72,7 @@ void config_load(const char *path, ClientConfig *cfg) {
 
 // trimite toate fisierele la server intr-un singur apel soap
 // si afiseaza raportul de plagiat primit
-void client_send_files(const char **filepaths, int count,
+char* client_send_files(const char **filepaths, int count,
                        const char *endpoint) {
   // alocam array-ul de fisiere si bufferele pentru continut
   struct ns__FileItem *items = malloc(count * sizeof(struct ns__FileItem));
@@ -129,14 +129,12 @@ void client_send_files(const char **filepaths, int count,
 
   // verificam ca avem cel putin 2 fisiere valide
   if (actual < 2) {
-    // NOLINTNEXTLINE(clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling)
-    fprintf(stderr, "[CLIENT] Sunt necesare cel putin 2 fisiere valide.\n");
     for (int i = 0; i < actual; i++){
       free(bufs[i]);
     }
     free(items);
     free(bufs);
-    return;
+    return strdup("[CLIENT] Sunt necesare cel putin 2 fisiere valide.");
   }
 
   // construim array-ul de fisiere pentru apelul soap
@@ -149,15 +147,13 @@ void client_send_files(const char **filepaths, int count,
   soap_init(&soap);
   char *report = NULL;
 
+  char *final_report = NULL;
   int status =
       soap_call_ns__analyzeFiles(&soap, endpoint, NULL, files, &report);
-  if (status == SOAP_OK) {
-    // afisam raportul primit de la server
-    printf("\n%s\n", report);
+  if (status == SOAP_OK && report) {
+    final_report = strdup(report);
   } else {
-    // NOLINTNEXTLINE(clang-analyzer-security.insecureAPI.DeprecatedOrUnsafeBufferHandling)
-    fprintf(stderr, "[CLIENT] Eroare la analiza fisierelor\n");
-    soap_print_fault(&soap, stderr);
+    final_report = strdup("[CLIENT] Eroare la analiza fisierelor sau server inaccesibil.");
   }
 
   // eliberam resursele soap si memoria alocata
@@ -170,4 +166,6 @@ void client_send_files(const char **filepaths, int count,
   }
   free(items);
   free(bufs);
+
+  return final_report;
 }

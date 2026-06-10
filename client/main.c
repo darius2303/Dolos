@@ -3,6 +3,7 @@
 #include <argtable2.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include "tui.h"
 
 #define ENDPOINT_SIZE 512
 
@@ -24,9 +25,11 @@ int main(int argc, char *argv[]) {
   // -f pentru fisiere, -h pentru ajutor
   struct arg_file *files =
       arg_filen("f", "files", "<file>", 0, 100, "fisiere de trimis la server");
+  struct arg_lit *tui =
+    arg_lit0(NULL, "tui", "launch ncurses interface");
   struct arg_lit *help = arg_lit0("h", "help", "afiseaza mesajul de ajutor");
   struct arg_end *end = arg_end(20);
-  void *argtable[] = {files, help, end};
+  void *argtable[] = {files, help, tui, end};
 
   // verificam daca tabelul de argumente a fost alocat corect
   if (arg_nullcheck(argtable) != 0) {
@@ -42,6 +45,14 @@ int main(int argc, char *argv[]) {
 
   // parsam argumentele primite din linia de comanda
   int nerrors = arg_parse(argc, argv, argtable);
+
+  if (tui->count > 0) {
+    launch_tui(endpoint);
+
+    arg_freetable(argtable,
+        sizeof(argtable) / sizeof(argtable[0]));
+    return 0;
+  }
 
   // daca utilizatorul a cerut ajutor, afisam modul de utilizare
   if (help->count > 0) {
@@ -65,7 +76,11 @@ int main(int argc, char *argv[]) {
 
   // daca au fost specificate fisiere, le trimitem la server pentru analiza
   if (files->count > 0) {
-    client_send_files(files->filename, files->count, endpoint);
+    char *report = client_send_files(files->filename, files->count, endpoint);
+    if (report) {
+        printf("%s\n", report);
+        free(report);
+    }
   } else {
     printf("Folositi -f pentru a specifica fisierele de analizat.\n");
     printf("Folositi -h pentru ajutor.\n");
