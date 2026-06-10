@@ -23,11 +23,29 @@ Rulare server:
 just server
 ```
 
-Rulare client:
+Rulare client: direct din linia de comanda
 
 ```sh
 ./build/Release/client -f demo/stack_original.c -f demo/stack_palg.c -f demo/other_stack.c
 ```
+
+alternativ:
+```sh
+just client
+```
+
+Rulare client folosind TUI:
+
+```sh
+./build/Release/client --tui
+```
+
+alternativ:
+```sh
+just tui
+```
+
+Clientul tui va detecta automat orice adaugare de fisier in folder-ul demo si il va afisa in meniu
 
 In cazul in care se fac schimbari se ruleaza din nou pasul de build cu:
 
