@@ -19,7 +19,10 @@ server:
     ./build/Release/server
 
 client:
-    ./build/Release/client
+    ./build/Release/client -f demo/stack_original.c -f demo/stack_palg.c -f demo/other_stack.c
+
+python-client:
+    python3 python-client/client.py ../demo/stack_original.c ../demo/stack_palg.c ../demo/other_stack.c
 
 admin:
     ./build/Release/admin
