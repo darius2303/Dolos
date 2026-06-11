@@ -29,3 +29,7 @@ admin:
 
 tui:
     ./build/Release/client --tui
+
+test-alg:
+	gcc -Wall -Wextra -O2 server/test-alg.c -lm -o build/test_alg
+	./build/test_alg
