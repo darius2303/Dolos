@@ -1,16 +1,19 @@
 openapi: "3.0.3"
 info:
   title: "Dolos Plagiarism Detection -- SOAP API (gSOAP mapping)"
-  version: "1.0.0"
+  version: "2.0.0"
   description: |
-    Documenteaza operatiile SOAP expuse de serverul gSOAP al
-    proiectului Dolos. Fiecare path reprezinta o actiune SOAP,
-    nu o resursa REST. Request/response descriu continutul
-    SOAP envelope.
-    Namespace: ns  (definit in services/service.h)
-    Protocol: SOAP 1.1, stil RPC, encoding: encoded
-    WSDL namespace: http://example.com/service.wsdl
-    Schema namespace: urn:service
+    Documenteaza operatia SOAP expusa de serverul gSOAP al
+    proiectului Dolos, conform definitiei din services/service.h.
+
+    Namespace:  ns
+    Protocol:   SOAP 1.1, stil RPC, encoding: encoded
+    WSDL ns:    http://example.com/service.wsdl
+    Schema ns:  urn:service
+
+    Nota: fisierul service.h defineste o singura operatie:
+      int ns__analyzeFiles(struct ns__ArrayOfFiles files, char **report)
+    Nu exista autentificare, inregistrare sau login in API-ul curent.
 
 servers:
   - url: "http://{host}:{port}"
@@ -23,184 +26,66 @@ servers:
 
 paths:
 
-  # ========== HELLO ==========
-  /soap#ns__hello:
+  /soap#ns__analyzeFiles:
     post:
-      operationId: ns__hello
-      summary: "Test de conectivitate client-server"
+      operationId: ns__analyzeFiles
+      summary: "Analiza fisiere pentru detectare plagiat"
       description: |
-        Operatie SOAP: ns__hello(char *name, char **result)
-        Clientul trimite un nume, serverul raspunde cu un
-        mesaj de salut. Folosita pentru verificarea end-to-end
-        a protocolului SOAP.
-        Implementare: server/server.c  ->  ns__hello()
-        Apel client:  soap_call_ns__hello()
-      requestBody:
-        required: true
-        content:
-          text/xml:
-            schema:
-              $ref: "#/components/schemas/HelloRequest"
-            example:
-              name: "William"
-      responses:
-        "200":
-          description: "SOAP_OK -- salut returnat"
-          content:
-            text/xml:
-              schema:
-                $ref: "#/components/schemas/HelloResponse"
-              example:
-                result: "Hello William"
-        "500":
-          description: "SOAP Fault (eroare interna)"
-          content:
-            text/xml:
-              schema:
-                $ref: "#/components/schemas/SoapFault"
+        Operatie SOAP: ns__analyzeFiles(struct ns__ArrayOfFiles files,
+                                        char **report)
 
-  # ========== REGISTER ==========
-  /soap#ns__register:
-    post:
-      operationId: ns__register
-      summary: "Inregistrare utilizator nou"
-      description: |
-        Operatie SOAP: ns__register(char *username,
-                       char *password, int *result)
-        Creeaza un cont nou pe server. Returneaza cod de
-        succes/eroare.
-        Implementare: server/server.c  ->  ns__register()
-      requestBody:
-        required: true
-        content:
-          text/xml:
-            schema:
-              $ref: "#/components/schemas/RegisterRequest"
-            example:
-              username: "student1"
-              password: "parola123"
-      responses:
-        "200":
-          description: "SOAP_OK -- rezultat inregistrare"
-          content:
-            text/xml:
-              schema:
-                $ref: "#/components/schemas/RegisterResponse"
-              example:
-                result: 0
-        "500":
-          description: "SOAP Fault (utilizator duplicat, eroare BD)"
-          content:
-            text/xml:
-              schema:
-                $ref: "#/components/schemas/SoapFault"
+        Primeste un array de fisiere (fiecare cu nume si continut binar
+        encodat base64), le compara intre ele si returneaza un raport
+        de similaritate in format text (similar cu output-ul MOSS).
 
-  # ========== LOGIN ==========
-  /soap#ns__login:
-    post:
-      operationId: ns__login
-      summary: "Autentificare utilizator"
-      description: |
-        Operatie SOAP: ns__login(char *username,
-                       char *password, char **token)
-        Autentifica utilizatorul si returneaza un token de
-        sesiune necesar pentru operatiile ulterioare.
-        Implementare: server/server.c  ->  ns__login()
-      requestBody:
-        required: true
-        content:
-          text/xml:
-            schema:
-              $ref: "#/components/schemas/LoginRequest"
-            example:
-              username: "student1"
-              password: "parola123"
-      responses:
-        "200":
-          description: "SOAP_OK -- token returnat"
-          content:
-            text/xml:
-              schema:
-                $ref: "#/components/schemas/LoginResponse"
-              example:
-                token: "token"
-        "500":
-          description: "SOAP Fault (credentiale invalide)"
-          content:
-            text/xml:
-              schema:
-                $ref: "#/components/schemas/SoapFault"
+        Exemplu raport:
+          === Raport Detectare Plagiat ===
+          Fisiere analizate: 3
 
-  # ========== SUBMIT FILES (planificat) ==========
-  /soap#ns__submit_files:
-    post:
-      operationId: ns__submit_files
-      summary: "Trimitere fisiere pentru analiza plagiat"
-      description: |
-        Operatie SOAP planificata:
-        ns__submit_files(char *token,
-                         struct ArrayOfFile *files,
-                         int *job_id)
-        Trimite unul sau mai multe fisiere catre server.
-        Clientul specifica fisierele cu flag-ul -f.
-        STATUS: stub -- client_send_files() afiseaza doar
-        numele fisierelor; transferul efectiv e planificat.
+          stack_original.c <-> stack_palg.c  : 59.9%
+          stack_original.c <-> other_stack.c :  4.0%
+          stack_palg.c     <-> other_stack.c :  1.0%
+
+        Implementare: server/server.c -> ns__analyzeFiles()
+        Apel client:  soap_call_ns__analyzeFiles()
+        Flagul CLI:   client -f <fisier1> -f <fisier2> ...
       requestBody:
         required: true
         content:
           text/xml:
             schema:
-              $ref: "#/components/schemas/SubmitFilesRequest"
+              $ref: "#/components/schemas/AnalyzeFilesRequest"
             example:
-              token: "token"
               files:
-                - filename: "tema1.c"
-                  content_base64: "I2luY2x1ZGUg..."
-                - filename: "tema2.c"
-                  content_base64: "I2luY2x1ZGUg..."
+                - filename: "stack_original.c"
+                  data:
+                    __ptr: "<continut binar>"
+                    __size: 1024
+                - filename: "stack_palg.c"
+                  data:
+                    __ptr: "<continut binar>"
+                    __size: 980
+                - filename: "other_stack.c"
+                  data:
+                    __ptr: "<continut binar>"
+                    __size: 512
       responses:
         "200":
-          description: "SOAP_OK -- job_id returnat"
+          description: "SOAP_OK -- raport de similaritate returnat"
           content:
             text/xml:
               schema:
-                $ref: "#/components/schemas/SubmitFilesResponse"
+                $ref: "#/components/schemas/AnalyzeFilesResponse"
               example:
-                job_id: 42
-        "500":
-          description: "SOAP Fault"
-          content:
-            text/xml:
-              schema:
-                $ref: "#/components/schemas/SoapFault"
+                report: |
+                  === Raport Detectare Plagiat ===
+                  Fisiere analizate: 3
 
-  # ========== GET REPORT (planificat) ==========
-  /soap#ns__get_report:
-    post:
-      operationId: ns__get_report
-      summary: "Obtinere raport plagiat"
-      description: |
-        Operatie SOAP planificata:
-        ns__get_report(int job_id, char **report)
-        Returneaza raportul de similaritate pentru un job
-        trimis anterior. Similar cu output-ul MOSS.
-      requestBody:
-        required: true
-        content:
-          text/xml:
-            schema:
-              $ref: "#/components/schemas/GetReportRequest"
-            example:
-              job_id: 42
-      responses:
-        "200":
-          description: "SOAP_OK -- raport returnat"
-          content:
-            text/xml:
-              schema:
-                $ref: "#/components/schemas/GetReportResponse"
+                  stack_original.c <-> stack_palg.c  : 59.9%
+                  stack_original.c <-> other_stack.c :  4.0%
+                  stack_palg.c     <-> other_stack.c :  1.0%
         "500":
-          description: "SOAP Fault (job inexistent)"
+          description: "SOAP Fault (eroare interna, fisiere invalide)"
           content:
             text/xml:
               schema:
@@ -209,105 +94,102 @@ paths:
 components:
   schemas:
 
-    HelloRequest:
+    xsd__base64Binary:
       type: object
-      required: [name]
+      description: |
+        Corespunde struct xsd__base64Binary din service.h.
+        Reprezinta date binare encodate in base64, cu metadate MIME
+        optionale (id, type, options).
+      required:
+        - __ptr
+        - __size
       properties:
-        name:
+        __ptr:
           type: string
-          description: "Numele trimis de client"
-          example: "William"
-
-    HelloResponse:
-      type: object
-      properties:
-        result:
-          type: string
-          description: "Mesaj de salut returnat"
-          example: "Hello William"
-
-    RegisterRequest:
-      type: object
-      required: [username, password]
-      properties:
-        username:
-          type: string
-          maxLength: 64
-        password:
-          type: string
-          maxLength: 128
-
-    RegisterResponse:
-      type: object
-      properties:
-        result:
+          format: byte
+          description: "Datele binare encodate base64 (continutul fisierului)"
+        __size:
           type: integer
-          description: "0=succes, -1=duplicat, -2=eroare"
-
-    LoginRequest:
-      type: object
-      required: [username, password]
-      properties:
-        username:
+          description: "Dimensiunea datelor in bytes"
+        id:
           type: string
-        password:
+          nullable: true
+          description: "Identificator optional"
+        type:
           type: string
-
-    LoginResponse:
-      type: object
-      properties:
-        token:
+          nullable: true
+          description: "Tipul MIME optional (ex: text/x-csrc)"
+        options:
           type: string
-          description: "Token de sesiune"
+          nullable: true
+          description: "Optiuni aditionale"
 
-    SubmitFilesRequest:
+    ns__FileItem:
       type: object
-      required: [token, files]
-      properties:
-        token:
-          type: string
-        files:
-          type: array
-          items:
-            $ref: "#/components/schemas/FileEntry"
-
-    FileEntry:
-      type: object
+      description: |
+        Corespunde struct ns__FileItem din service.h.
+        Un fisier cu numele sau si continutul binar encodat base64.
+      required:
+        - filename
+        - data
       properties:
         filename:
           type: string
-        content_base64:
-          type: string
-          format: byte
-          description: "Continut fisier codificat base64"
+          description: "Numele fisierului (ex: tema1.c)"
+          example: "stack_original.c"
+        data:
+          $ref: "#/components/schemas/xsd__base64Binary"
 
-    SubmitFilesResponse:
+    ns__ArrayOfFiles:
       type: object
+      description: |
+        Corespunde struct ns__ArrayOfFiles din service.h.
+        Array de fisiere trimise spre analiza. Campul __size reflecta
+        numarul de elemente din __ptr.
+      required:
+        - __ptr
+        - __size
       properties:
-        job_id:
+        __ptr:
+          type: array
+          items:
+            $ref: "#/components/schemas/ns__FileItem"
+          description: "Array-ul de fisiere"
+        __size:
           type: integer
+          description: "Numarul de fisiere din array"
+          example: 3
 
-    GetReportRequest:
+    AnalyzeFilesRequest:
       type: object
-      required: [job_id]
+      description: "Corpul SOAP request pentru ns__analyzeFiles"
+      required:
+        - files
       properties:
-        job_id:
-          type: integer
+        files:
+          $ref: "#/components/schemas/ns__ArrayOfFiles"
 
-    GetReportResponse:
+    AnalyzeFilesResponse:
       type: object
+      description: "Corpul SOAP response pentru ns__analyzeFiles"
       properties:
         report:
           type: string
-          description: "Raport similaritate (text/HTML)"
+          description: |
+            Raportul de similaritate in format text.
+            Contine procentajele de similaritate pentru fiecare pereche
+            de fisiere analizate.
 
     SoapFault:
       type: object
+      description: "SOAP Fault returnat in caz de eroare"
       properties:
         faultcode:
           type: string
+          example: "SOAP-ENV:Server"
         faultstring:
           type: string
+          example: "Eroare interna la procesarea fisierelor"
         detail:
           type: string
-
+          example: "Numarul de fisiere trebuie sa fie >= 2"

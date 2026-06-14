@@ -14,7 +14,7 @@ from textual import work
 from textual.worker import get_current_worker
 
 WSDL_PATH = os.path.join(os.path.dirname(__file__), "../generated/ns.wsdl")
-DEFAULT_ENDPOINT = "http://localhost:8080"
+DEFAULT_ENDPOINT = "http://localhost:9090"
 DEMO_FOLDER_PATH = Path(__file__).parent.parent / "demo"
 
 

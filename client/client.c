@@ -2,6 +2,7 @@
 #include "client.h"
 #include "soapH.h"
 #include <libconfig.h>
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -24,7 +25,7 @@ void config_load(const char *path, ClientConfig *cfg) {
     perror("snprintf");
   }
 
-  // incercam sa citim fisierul de configurare
+  // incercam sa citim fiadd ierul de configurare
   // daca nu reusim, afisam eroare si pastram valorile default
 
   if (!config_read_file(&lib_cfg, path)) {
