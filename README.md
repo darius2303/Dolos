@@ -1,63 +1,67 @@
-# Detectare Plagiat (MOSS-like)
+# Plagiarism Detection (MOSS-like)
 
-## Tema proiect
+## Project Topic
 
-Se trimit un număr mare de fișiere (nu neapărat de cod sursă) și se vor compara din punct de vedere al conținutului, în scopul detectării plagiatului; aplicația va fi customized pentru a funcționa în diverse scenarii de utilizare. Outputul primit va fi un report conținând toate comparațiile efectuate (vezi spre exemplu MOSS). 
+A large number of files, not necessarily source code files, are submitted and compared based on their content in order to detect plagiarism. The application can be customized to work in different usage scenarios.
 
-## Rulare proiect
+The output is a report containing all the comparisons performed, similar to systems such as MOSS.
 
-Pentru a rula proiectul cat mai usor este nevoie de utilitara `just`:
+## Running the Project
 
-[Just Github Link](https://github.com/casey/just)
+To run the project as easily as possible, the `just` command runner is required:
 
-Build proiect:
+[Just GitHub Link](https://github.com/casey/just)
+
+Configure and build the project:
 
 ```sh
 just configure
 just build
 ```
 
-Rulare server:
+Start the server:
 
 ```sh
 just server
 ```
 
-Rulare client: direct din linia de comanda
+Run the client directly from the command line:
 
 ```sh
 ./build/Release/client -f demo/stack_original.c -f demo/stack_palg.c -f demo/other_stack.c
 ```
 
-alternativ:
+Alternatively:
+
 ```sh
 just client
 ```
 
-Rulare client folosind TUI:
+Run the client using the TUI:
 
 ```sh
 ./build/Release/client --tui
 ```
 
-alternativ:
+Alternatively:
+
 ```sh
 just tui
 ```
 
-Clientul tui va detecta automat orice adaugare de fisier in folder-ul demo si il va afisa in meniu
+The TUI client automatically detects any files added to the `demo` folder and displays them in the menu.
 
-In cazul in care se fac schimbari se ruleaza din nou pasul de build cu:
+After making changes, rebuild the project using:
 
-```
+```sh
 just cbuild
 ```
 
-Exemplu de raport:
+Example report:
 
-```
-=== Raport Detectare Plagiat ===
-Fisiere analizate: 3
+```text
+=== Plagiarism Detection Report ===
+Files analyzed: 3
 
 stack_original.c <-> stack_palg.c : 59.9%
 stack_original.c <-> other_stack.c : 4.0%
@@ -66,41 +70,42 @@ stack_palg.c <-> other_stack.c : 1.0%
 
 ## Checks
 
-### Nivel A
+### Level A
 
-Falg-uri compilare:
+Compilation flags:
 
 ```sh
 gcc -Wall -Wextra -Wpedantic -Werror -g -std=c11 -D_POSIX_C_SOURCE=200809L server.c -o server
 ```
 
-### Nivel B
+### Level B
 
-Flag-uri compilare
+Compilation flags:
 
 ```sh
 gcc -Wall -Wextra -Wpedantic -g -std=c11 -D_POSIX_C_SOURCE=200809L -pthread server.c -o server
 ```
 
-Memcheck
+Memory check:
 
 ```sh
 valgrind --leak-check=full --show-leak-kinds=all --track-origins=yes ./server
 ```
 
-Helgrind 
+Helgrind:
 
 ```sh
 valgrind --tool=helgrind ./server
 ```
 
-Address & Leak Sanitizer
+Address, Leak, and Undefined Behavior Sanitizers:
 
 ```sh
-gcc -g -O0 -fno-omit-frame-pointer -fsanitize=address,leak,undefined server.c -o server 
+gcc -g -O0 -fno-omit-frame-pointer -fsanitize=address,leak,undefined server.c -o server
 ```
-Thread Sanitizer
+
+Thread Sanitizer:
 
 ```sh
-gcc -g -O0 -fno-omit-frame-pointer -fsanitize=thread -pthread server.c -o server 
+gcc -g -O0 -fno-omit-frame-pointer -fsanitize=thread -pthread server.c -o server
 ```
